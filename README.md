@@ -4,6 +4,8 @@
 ### Roll Number: 2024117005
 ### Email: tatva.agarwal@research.iiit.ac.in
 
+### Github Link: [https://github.com/winterdew/IIIT-CyberGIS-MidLab-2024117005](https://github.com/winterdew/IIIT-CyberGIS-MidLab-2024117005)
+
 
 ## Identified gap
 While the Bhoonidhi platform has data access via direct download and Bhoonidhi API which is a subset of the OGC API standards, It does not provide a SensorThings Compliant API. Sensor things allows a unified access to Time Series data from both MQTT and HTTP. This is essential for collating multiple datasets together including ground based measurements like Tsunami Buoys. This helps end users be able to perform various temporal analyses without having to download the entire dataset. 
