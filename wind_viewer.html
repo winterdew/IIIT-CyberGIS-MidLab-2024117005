@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scatterometer Wind Viewer</title>
+<!--
+  Visualises the EOS-06 Scatterometer winds ingested by data_import.py, read live
+  from FROST-Server through the OGC SensorThings API.
+  Start FROST (docker compose up -d), run data_import.py, then open this file in a browser.
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11, 11, 11, 0.10); --error: #d03b3b;
+    --series-1: #2a78d6; --series-2: #eb6834;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10); --error: #e66767;
+      --series-1: #3987e5; --series-2: #d95926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 16px 16px 4px; }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 14px; margin: 0; }
+  .sub { color: var(--ink-2); margin: 2px 0 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; padding: 8px 16px 12px; }
+  .controls label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-2); }
+  select, input, button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+  input#server { width: min(340px, 80vw); }
+  button { cursor: pointer; }
+  #status { color: var(--muted); font-size: 12px; padding-bottom: 8px; }
+  #status.error { color: var(--error); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 12px; padding: 0 16px 16px; height: calc(100vh - 140px); min-height: 520px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+  #map { overflow: hidden; background: var(--surface); }
+  aside { padding: 14px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+  .hint, .meta { color: var(--ink-2); margin: 2px 0 0; font-size: 12px; }
+  .chart { position: relative; height: 190px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 4px 6px; text-align: right; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--ink-2); font-weight: 600; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+  .legend { background: var(--surface); color: var(--ink-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 11px; }
+  .legend .bar { width: 180px; height: 10px; border-radius: 2px; margin: 4px 0 2px; }
+  .legend .ticks { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+  #tip { position: absolute; z-index: 1000; pointer-events: none; display: none; background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); white-space: nowrap; }
+  #tip strong { font-size: 13px; }
+  #tip .lbl { color: var(--ink-2); }
+  .wind-layer { pointer-events: none; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: minmax(0, 1fr); height: auto; }
+    #map { height: 60vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>EOS-06 Scatterometer winds</h1>
+  <p class="sub">Ocean surface wind speed and direction (25 km grid), read live from FROST-Server via the OGC SensorThings API.</p>
+</header>
+
+<div class="controls">
+  <label>SensorThings endpoint
+    <input id="server" value="http://localhost:8080/FROST-Server/v1.1">
+  </label>
+  <button id="connect">Connect</button>
+  <label>Day
+    <select id="product" disabled></select>
+  </label>
+  <label>Pass
+    <select id="pass">
+      <option>Ascending</option>
+      <option>Descending</option>
+    </select>
+  </label>
+</div>
+<div id="status" class="controls"></div>
+
+<main>
+  <div id="map" class="card"></div>
+  <aside class="card">
+    <div>
+      <h2 id="cell-title">No cell selected</h2>
+      <p id="cell-meta" class="hint">Click a grid cell on the map to see its wind time series.</p>
+    </div>
+    <div>
+      <h2>Wind speed (m/s)</h2>
+      <div class="chart"><canvas id="speed-chart"></canvas></div>
+    </div>
+    <div>
+      <h2>Wind direction (blowing towards, ° from North)</h2>
+      <div class="chart"><canvas id="dir-chart"></canvas></div>
+    </div>
+    <details>
+      <summary>Show as table</summary>
+      <table id="table"></table>
+    </details>
+  </aside>
+</main>
+
+<script>
+const GRID = 0.25, GRID_COLS = 1440, MAX_SPEED = 20;
+// Sequential blue ramp (light -> dark). Light mode: dark = fast. Dark mode is reversed so fast winds stand out on the dark map.
+const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+              "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
+const darkMode = matchMedia("(prefers-color-scheme: dark)");
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const $ = id => document.getElementById(id);
+
+const ramp = () => darkMode.matches ? [...RAMP].reverse() : RAMP;
+const speedColor = v => { const r = ramp(); return r[Math.min(r.length - 1, Math.floor(v / MAX_SPEED * r.length))]; };
+const cellLat = row => -90 + (row + 0.5) * GRID;
+const cellLon = col => { const l = (col + 0.5) * GRID; return l > 180 ? l - 360 : l; };
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+const compass = deg => COMPASS[Math.round(deg / 45) % 8];
+const fmtLat = v => `${Math.abs(v).toFixed(3)}°${v >= 0 ? "N" : "S"}`;
+const fmtLon = v => `${Math.abs(v).toFixed(3)}°${v >= 0 ? "E" : "W"}`;
+
+function setStatus(text, isError = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("error", isError);
+}
+
+// ---------- SensorThings API access ----------
+let base = "";
+
+function stUrl(path, params = {}) {
+  const url = new URL(`${base}/${path}`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  return url.toString();
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${(await r.text()).slice(0, 200)}`);
+  return r.json();
+}
+
+async function getAll(path, params) {
+  let url = stUrl(path, params), items = [];
+  while (url) {
+    const body = await getJSON(url);
+    items.push(...body.value);
+    url = body["@iot.nextLink"];
+  }
+  return items;
+}
+
+// Distinct products (one per day): walk parameters/productId in order, one Observation at a time.
+async function loadProducts() {
+  const products = [];
+  let last = null;
+  for (;;) {
+    const params = { "$select": "phenomenonTime,parameters", "$orderby": "parameters/productId asc", "$top": "1" };
+    if (last) params["$filter"] = `parameters/productId gt '${last}'`;
+    const [obs] = (await getJSON(stUrl("Observations", params))).value;
+    if (!obs) break;
+    last = obs.parameters.productId;
+    const m = last.match(/(\d{4})(\d{3})_/);
+    const date = new Date(Date.UTC(+m[1], 0, +m[2]));
+    products.push({
+      id: last,
+      label: date.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }),
+      acquired: obs.phenomenonTime,
+    });
+    setStatus(`Finding products… ${products.length} found`);
+  }
+  return products;
+}
+
+// All wind vectors of one product and pass: speed + direction joined per grid cell (Thing).
+async function loadSnapshot(productId, pass) {
+  const obs = await getAll("Observations", {
+    "$filter": `parameters/productId eq '${productId}' and Datastream/properties/pass eq '${pass}'`,
+    "$select": "result,parameters",
+    "$expand": "Datastream($select=properties;$expand=Thing($select=id,properties/row,properties/col))",
+    "$orderby": "id asc",
+    "$top": "10000",
+  });
+  const cells = new Map();
+  for (const o of obs) {
+    const thing = o.Datastream.Thing, { row, col } = thing.properties;
+    const key = row * GRID_COLS + col;
+    let cell = cells.get(key);
+    if (!cell) {
+      cell = { key, thing: thing["@iot.id"], row, col, lat: cellLat(row), lon: cellLon(col), quality: o.parameters.qualityFlag };
+      cells.set(key, cell);
+    }
+    cell[o.Datastream.properties.variable] = o.result;
+  }
+  return cells;
+}
+
+// Full time series of one grid cell: productId -> { Ascending: {wind_speed, wind_direction}, Descending: {...} }.
+async function loadSeries(thingId) {
+  const thing = await getJSON(stUrl(`Things(${thingId})`, {
+    "$select": "name",
+    "$expand": "Datastreams($select=properties;$expand=Observations($select=phenomenonTime,result,parameters;$orderby=phenomenonTime asc;$top=1000))",
+  }));
+  const byProduct = {};
+  for (const ds of thing.Datastreams) {
+    for (const o of ds.Observations) {
+      const p = (byProduct[o.parameters.productId] ??= { Ascending: {}, Descending: {} });
+      p[ds.properties.pass][ds.properties.variable] = o.result;
+    }
+  }
+  return byProduct;
+}
+
+// ---------- Map ----------
+const map = L.map("map", { worldCopyJump: true }).setView([15, 70], 4);
+const tiles = () => "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/" +
+  `World_${darkMode.matches ? "Dark" : "Light"}_Gray_Base/MapServer/tile/{z}/{y}/{x}`;
+const basemap = L.tileLayer(tiles(), {
+  maxZoom: 16,
+  attribution: "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ",
+}).addTo(map);
+
+// Canvas layer drawing every grid cell (coloured by speed) and a thinned set of direction arrows.
+const WindLayer = L.Layer.extend({
+  onAdd(m) {
+    this._canvas = L.DomUtil.create("canvas", "wind-layer");
+    m.getPanes().overlayPane.appendChild(this._canvas);
+    m.on("moveend zoomend resize viewreset", this.redraw, this);
+    m.on("zoomstart", this._hide, this);
+    this.redraw();
+  },
+  onRemove(m) {
+    this._canvas.remove();
+    m.off("moveend zoomend resize viewreset", this.redraw, this);
+    m.off("zoomstart", this._hide, this);
+  },
+  setData(cells) { this.cells = cells; this.redraw(); },
+  setSelected(cell) { this.selected = cell; this.redraw(); },
+  _hide() { this._canvas.style.visibility = "hidden"; },
+  redraw() {
+    const m = this._map;
+    if (!m) return;
+    const size = m.getSize(), dpr = window.devicePixelRatio || 1, canvas = this._canvas;
+    canvas.width = size.x * dpr; canvas.height = size.y * dpr;
+    canvas.style.width = `${size.x}px`; canvas.style.height = `${size.y}px`;
+    L.DomUtil.setPosition(canvas, m.containerPointToLayerPoint([0, 0]));
+    canvas.style.visibility = "visible";
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    if (!this.cells) return;
+
+    const bounds = m.getBounds().pad(0.05), h = GRID / 2, arrows = [], taken = new Set(), SPACING = 26;
+    ctx.globalAlpha = 0.9;
+    for (const c of this.cells.values()) {
+      if (c.wind_speed == null || !bounds.contains([c.lat, c.lon])) continue;
+      const nw = m.latLngToContainerPoint([c.lat + h, c.lon - h]), se = m.latLngToContainerPoint([c.lat - h, c.lon + h]);
+      ctx.fillStyle = speedColor(c.wind_speed);
+      ctx.fillRect(nw.x, nw.y, Math.max(1, se.x - nw.x), Math.max(1, se.y - nw.y));
+      // One arrow per SPACING x SPACING pixel bucket, so arrows stay legible at every zoom.
+      const cx = (nw.x + se.x) / 2, cy = (nw.y + se.y) / 2, bucket = `${Math.floor(cx / SPACING)},${Math.floor(cy / SPACING)}`;
+      if (c.wind_direction != null && !taken.has(bucket)) { taken.add(bucket); arrows.push([cx, cy, c.wind_direction]); }
+    }
+    ctx.globalAlpha = 1;
+    // Arrows point where the wind blows towards. A surface-coloured halo keeps them visible on any cell colour.
+    const len = SPACING * 0.36;
+    for (const [stroke, width] of [[css("--surface"), 3.5], [css("--ink"), 1.5]]) {
+      ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.lineCap = "round"; ctx.lineJoin = "round";
+      ctx.beginPath();
+      for (const [x, y, deg] of arrows) {
+        const a = deg * Math.PI / 180, dx = Math.sin(a), dy = -Math.cos(a);
+        const tx = x + dx * len, ty = y + dy * len;
+        ctx.moveTo(x - dx * len, y - dy * len); ctx.lineTo(tx, ty);
+        for (const s of [-1, 1]) {
+          const b = a + Math.PI + s * 0.5;
+          ctx.moveTo(tx, ty); ctx.lineTo(tx + Math.sin(b) * len * 0.55, ty - Math.cos(b) * len * 0.55);
+        }
+      }
+      ctx.stroke();
+    }
+    if (this.selected) {
+      const c = this.selected, nw = m.latLngToContainerPoint([c.lat + h, c.lon - h]), se = m.latLngToContainerPoint([c.lat - h, c.lon + h]);
+      const pad = 3;
+      ctx.lineWidth = 2; ctx.strokeStyle = css("--ink");
+      ctx.strokeRect(nw.x - pad, nw.y - pad, se.x - nw.x + 2 * pad, se.y - nw.y + 2 * pad);
+    }
+  },
+});
+const windLayer = new WindLayer().addTo(map);
+
+// Colour legend
+const legend = L.control({ position: "bottomleft" });
+legend.onAdd = () => {
+  const div = L.DomUtil.create("div", "legend");
+  div.innerHTML = `<div>Wind speed (m/s)</div><div class="bar"></div>
+    <div class="ticks"><span>0</span><span>5</span><span>10</span><span>15</span><span>${MAX_SPEED}+</span></div>`;
+  return div;
+};
+legend.addTo(map);
+const paintLegend = () => {
+  document.querySelector(".legend .bar").style.background = `linear-gradient(to right, ${ramp().join(", ")})`;
+};
+paintLegend();
+
+// Hover tooltip and click selection: the whole grid cell under the pointer is the hit target.
+const tip = L.DomUtil.create("div", "", map.getContainer());
+tip.id = "tip";
+function cellAt(latlng) {
+  if (!windLayer.cells) return null;
+  const row = Math.floor((latlng.lat + 90) / GRID);
+  const col = Math.floor((((latlng.lng % 360) + 360) % 360) / GRID);
+  return windLayer.cells.get(row * GRID_COLS + col) || null;
+}
+function line(label, value) {
+  const div = document.createElement("div");
+  const strong = document.createElement("strong"); strong.textContent = value;
+  const span = document.createElement("span"); span.className = "lbl"; span.textContent = ` ${label}`;
+  div.append(strong, span);
+  return div;
+}
+map.on("mousemove", e => {
+  const c = cellAt(e.latlng);
+  if (!c) { tip.style.display = "none"; map.getContainer().style.cursor = ""; return; }
+  tip.replaceChildren(
+    line("wind speed", `${c.wind_speed?.toFixed(2) ?? "–"} m/s`),
+    line(`towards ${c.wind_direction != null ? compass(c.wind_direction) : ""}`, `${c.wind_direction?.toFixed(0) ?? "–"}°`),
+    line(`quality flag · ${fmtLat(c.lat)} ${fmtLon(c.lon)}`, String(c.quality)),
+  );
+  tip.style.display = "block";
+  const p = e.containerPoint, size = map.getSize();
+  tip.style.left = `${Math.min(p.x + 14, size.x - tip.offsetWidth - 4)}px`;
+  tip.style.top = `${Math.min(p.y + 14, size.y - tip.offsetHeight - 4)}px`;
+  map.getContainer().style.cursor = "pointer";
+});
+map.on("mouseout", () => { tip.style.display = "none"; });
+map.on("click", e => { const c = cellAt(e.latlng); if (c) selectCell(c); });
+
+// ---------- Charts ----------
+let products = [], speedChart, dirChart, selectedCell, series;
+
+// Vertical crosshair at the hovered day.
+const crosshair = {
+  id: "crosshair",
+  afterDatasetsDraw(chart) {
+    const active = chart.tooltip?.getActiveElements();
+    if (!active?.length) return;
+    const x = active[0].element.x, { top, bottom } = chart.chartArea, ctx = chart.ctx;
+    ctx.save(); ctx.strokeStyle = css("--axis"); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke(); ctx.restore();
+  },
+};
+
+function chartOptions(y, formatValue) {
+  return {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { position: "top", align: "start", labels: { usePointStyle: true, pointStyle: "line", color: css("--ink-2"), boxWidth: 18 } },
+      tooltip: {
+        backgroundColor: css("--surface"), titleColor: css("--ink-2"), bodyColor: css("--ink"),
+        borderColor: css("--border"), borderWidth: 1, usePointStyle: true,
+        callbacks: {
+          title: items => {
+            const p = products[items[0].dataIndex];
+            return `${p.label} · acquired ${p.acquired.replace("T", " ").replace(/\.\d+Z/g, "Z").replace("/", " – ")}`;
+          },
+          label: item => `${formatValue(item.parsed.y)}  ${item.dataset.label}`,
+          labelPointStyle: () => ({ pointStyle: "line", rotation: 0 }),
+        },
+      },
+    },
+    scales: {
+      x: { grid: { display: false }, border: { color: css("--axis") }, ticks: { color: css("--muted"), maxRotation: 0, autoSkip: true } },
+      // Fixed axis width so both charts share the same x positions.
+      y: { ...y, grid: { color: css("--grid") }, border: { display: false }, ticks: { ...y.ticks, color: css("--muted") },
+           afterFit: scale => { scale.width = 56; } },
+    },
+  };
+}
+
+function dataset(label, color, data, showLine) {
+  return { label, data, borderColor: color, backgroundColor: color, borderWidth: 2, showLine, spanGaps: false,
+           pointRadius: 4, pointHoverRadius: 6, pointBorderColor: css("--surface"), pointBorderWidth: 2 };
+}
+
+function renderCharts() {
+  speedChart?.destroy(); dirChart?.destroy();
+  const labels = products.map(p => p.label);
+  const values = (pass, variable) => products.map(p => series?.[p.id]?.[pass]?.[variable] ?? null);
+  const [s1, s2] = [css("--series-1"), css("--series-2")];
+
+  speedChart = new Chart($("speed-chart"), {
+    type: "line",
+    data: { labels, datasets: [
+      dataset("Ascending", s1, values("Ascending", "wind_speed"), true),
+      dataset("Descending", s2, values("Descending", "wind_speed"), true),
+    ] },
+    options: chartOptions({ beginAtZero: true, ticks: {} }, v => `${v.toFixed(2)} m/s`),
+    plugins: [crosshair],
+  });
+  // Direction is circular, so points only: a line from 350° to 10° would cross the whole axis.
+  dirChart = new Chart($("dir-chart"), {
+    type: "line",
+    data: { labels, datasets: [
+      dataset("Ascending", s1, values("Ascending", "wind_direction"), false),
+      dataset("Descending", s2, values("Descending", "wind_direction"), false),
+    ] },
+    options: chartOptions(
+      { min: 0, max: 360, ticks: { stepSize: 90, callback: v => `${{ 0: "N", 90: "E", 180: "S", 270: "W", 360: "N" }[v]} ${v}°` } },
+      v => `${v.toFixed(0)}° towards ${compass(v)}`),
+    plugins: [crosshair],
+  });
+  renderTable();
+}
+
+function renderTable() {
+  const table = $("table");
+  const cells = [["Day", "Asc speed (m/s)", "Asc dir (°)", "Desc speed (m/s)", "Desc dir (°)"]];
+  const fmt = (v, d) => v == null ? "–" : v.toFixed(d);
+  for (const p of products) {
+    const s = series?.[p.id];
+    cells.push([p.label, fmt(s?.Ascending.wind_speed, 2), fmt(s?.Ascending.wind_direction, 0),
+                fmt(s?.Descending.wind_speed, 2), fmt(s?.Descending.wind_direction, 0)]);
+  }
+  table.replaceChildren(...cells.map((row, i) => {
+    const tr = document.createElement("tr");
+    for (const text of row) { const td = document.createElement(i ? "td" : "th"); td.textContent = text; tr.append(td); }
+    return tr;
+  }));
+}
+
+async function selectCell(cell) {
+  selectedCell = cell;
+  windLayer.setSelected(cell);
+  $("cell-title").textContent = `Cell ${fmtLat(cell.lat)} ${fmtLon(cell.lon)}`;
+  $("cell-meta").textContent = "Loading time series…";
+  try {
+    series = await loadSeries(cell.thing);
+    const days = Object.keys(series).length;
+    $("cell-meta").textContent = `Thing ${cell.thing} · grid row ${cell.row}, column ${cell.col} · data on ${days} of ${products.length} days`;
+    renderCharts();
+  } catch (err) {
+    $("cell-meta").textContent = `Could not load the time series: ${err.message}`;
+  }
+}
+
+// ---------- Wiring ----------
+let firstSnapshot = true;
+async function showSnapshot() {
+  const product = $("product").value, pass = $("pass").value;
+  if (!product) return;
+  setStatus(`Loading ${pass.toLowerCase()} pass for ${products.find(p => p.id === product).label}…`);
+  try {
+    const cells = await loadSnapshot(product, pass);
+    windLayer.setData(cells);
+    if (firstSnapshot && cells.size) {
+      map.fitBounds(L.latLngBounds([...cells.values()].map(c => [c.lat, c.lon])).pad(0.05));
+      firstSnapshot = false;
+    }
+    setStatus(`${cells.size.toLocaleString()} wind vectors · ${product} · ${pass} pass. Hover a cell for values, click it for its time series.`);
+  } catch (err) {
+    setStatus(`Failed to load observations: ${err.message}`, true);
+  }
+}
+
+async function connect() {
+  base = $("server").value.trim().replace(/\/+$/, "");
+  $("product").disabled = true;
+  try {
+    products = await loadProducts();
+  } catch (err) {
+    setStatus(`Could not reach ${base} (${err.message}). Is FROST running and CORS enabled?`, true);
+    return;
+  }
+  if (!products.length) { setStatus("Connected, but no observations found. Run data_import.py first.", true); return; }
+  $("product").replaceChildren(...products.map(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id; opt.textContent = p.label;
+    return opt;
+  }));
+  $("product").disabled = false;
+  series = null; selectedCell = null; windLayer.setSelected(null);
+  renderCharts();
+  await showSnapshot();
+}
+
+$("connect").addEventListener("click", connect);
+$("product").addEventListener("change", showSnapshot);
+$("pass").addEventListener("change", showSnapshot);
+darkMode.addEventListener("change", () => {
+  basemap.setUrl(tiles()); paintLegend(); windLayer.redraw(); renderCharts();
+});
+connect();
+</script>
+</body>
+</html>
