@@ -88,4 +88,11 @@ All queries are relative to the API root `http://localhost:8080/FROST-Server/v1.
 
 **Note**: Wind direction is oceanographic (direction the wind blows *towards*, clockwise from North).
 
+## Limitations: 
+
+The limitations are: 
+1. The data ingestion is still human mediated.
+2. Generating `Thing` for each grid cell is not efficient. SensorThings is not ideal for Gridded Rasters. 
+3. There is not security implementation in the current implementation. 
+
 
